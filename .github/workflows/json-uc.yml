@@ -62,9 +62,9 @@ jobs:
 
       - name: Upload Python Script to DBFS
         run: |
-          echo " Uploading scripts/json_to_external_table.py to DBFS..."
-          databricks fs cp scripts/json_to_external_table.py \
-            dbfs:/scripts/json_to_external_table.py \
+          echo " Uploading scripts/json-uc.py to DBFS..."
+          databricks fs cp scripts/json-uc.py \
+            dbfs:/scripts/json-uc.py \
             --overwrite
           echo " Script uploaded to DBFS!"
 
@@ -78,7 +78,7 @@ jobs:
               "run_name": "json_to_uc_external_table_${{ github.run_id }}",
               "existing_cluster_id": "${{ secrets.DATABRICKS_CLUSTER_ID }}",
               "spark_python_task": {
-                "python_file": "dbfs:/scripts/json_to_external_table.py",
+                "python_file": "dbfs:/scripts/json-uc.py",
                 "parameters": [
                   "${{ github.event.inputs.json_path }}",
                   "${{ github.event.inputs.delta_output_path }}",
