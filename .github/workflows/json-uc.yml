@@ -111,7 +111,7 @@ jobs:
           echo " Waiting for Run ID: $RUN_ID to complete..."
 
           while true; do
-            STATUS_OUTPUT=$(databricks jobs get-run $RUN_ID)
+            STATUS_OUTPUT=$(databricks jobs get-run --run-id $RUN_ID)
 
             LIFE_CYCLE=$(echo $STATUS_OUTPUT | python3 -c "
           import sys, json
