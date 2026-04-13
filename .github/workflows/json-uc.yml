@@ -1,0 +1,174 @@
+name: JSON to UC External Table
+on:
+  workflow_dispatch:
+    inputs:
+      json_path:
+        description: "ADLS JSON source path"
+        required: true
+        default: ""
+      delta_output_path:
+        description: "ADLS Delta output path"
+        required: true
+        default: ""
+      catalog_name:
+        description: "UC Catalog name"
+        required: true
+        default: ""
+      schema_name:
+        description: "UC Schema name"
+        required: true
+        default: ""
+      table_name:
+        description: "UC External Table name"
+        required: true
+        default: ""
+
+jobs:
+  convert-and-register:
+    name: Convert JSON to UC External Table
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        run: |
+          echo " Installing Databricks CLI..."
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks --version
+          echo " Databricks CLI installed!"
+
+      - name: Configure Databricks CLI
+        run: |
+          echo " Configuring Databricks CLI..."
+
+          cat > ~/.databrickscfg << EOF
+          [DEFAULT]
+          host  = ${{ secrets.DATABRICKS_HOST }}
+          token = ${{ secrets.DATABRICKS_TOKEN }}
+          EOF
+          echo " Databricks CLI configured!"
+
+      - name: Validate Inputs
+        run: |
+          echo "  Job Inputs:"
+          echo "  JSON Path       : ${{ github.event.inputs.json_path }}"
+          echo "  Delta Path      : ${{ github.event.inputs.delta_output_path }}"
+          echo "  Catalog         : ${{ github.event.inputs.catalog_name }}"
+          echo "  Schema          : ${{ github.event.inputs.schema_name }}"
+          echo "  Table           : ${{ github.event.inputs.table_name }}"
+          echo "  Full Table Name : ${{ github.event.inputs.catalog_name }}.${{ github.event.inputs.schema_name }}.${{ github.event.inputs.table_name }}"
+
+      - name: Upload Python Script to DBFS
+        run: |
+          echo " Uploading scripts/json_to_external_table.py to DBFS..."
+          databricks fs cp scripts/json_to_external_table.py \
+            dbfs:/scripts/json_to_external_table.py \
+            --overwrite
+          echo " Script uploaded to DBFS!"
+
+      - name: Submit Databricks Job via CLI
+        id: submit_job
+        run: |
+          echo " Submitting Databricks job via CLI..."
+
+          RUN_OUTPUT=$(databricks jobs submit \
+            --json '{
+              "run_name": "json_to_uc_external_table_${{ github.run_id }}",
+              "existing_cluster_id": "${{ secrets.DATABRICKS_CLUSTER_ID }}",
+              "spark_python_task": {
+                "python_file": "dbfs:/scripts/json_to_external_table.py",
+                "parameters": [
+                  "${{ github.event.inputs.json_path }}",
+                  "${{ github.event.inputs.delta_output_path }}",
+                  "${{ github.event.inputs.catalog_name }}",
+                  "${{ github.event.inputs.schema_name }}",
+                  "${{ github.event.inputs.table_name }}"
+                ]
+              }
+            }')
+
+          echo "CLI Output: $RUN_OUTPUT"
+
+          # Extract run_id
+          RUN_ID=$(echo $RUN_OUTPUT | python3 -c "
+          import sys, json
+          print(json.load(sys.stdin).get('run_id', ''))
+          ")
+
+          if [ -z "$RUN_ID" ]; then
+            echo " Failed to submit Databricks job!"
+            exit 1
+          fi
+
+          echo " Job submitted! Run ID: $RUN_ID"
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for Databricks Job to Complete
+        run: |
+          RUN_ID=${{ steps.submit_job.outputs.run_id }}
+          echo " Waiting for Run ID: $RUN_ID to complete..."
+
+          while true; do
+            STATUS_OUTPUT=$(databricks jobs get-run $RUN_ID)
+
+            LIFE_CYCLE=$(echo $STATUS_OUTPUT | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('state', {}).get('life_cycle_state', 'UNKNOWN'))
+            ")
+
+            RESULT_STATE=$(echo $STATUS_OUTPUT | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('state', {}).get('result_state', 'PENDING'))
+            ")
+
+            echo "  Status: $LIFE_CYCLE | Result: $RESULT_STATE"
+
+            if [ "$LIFE_CYCLE" == "TERMINATED" ]; then
+              if [ "$RESULT_STATE" == "SUCCESS" ]; then
+                echo " Databricks job completed successfully!"
+                break
+              else
+                echo " Databricks job FAILED! Result: $RESULT_STATE"
+                echo " Fetching logs..."
+                databricks jobs get-run-output $RUN_ID || true
+                exit 1
+              fi
+            fi
+
+            sleep 15
+          done
+
+      - name: Fetch Job Output Logs
+        if: success()
+        run: |
+          RUN_ID=${{ steps.submit_job.outputs.run_id }}
+          echo " Fetching job output logs..."
+          databricks jobs get-run-output $RUN_ID || true
+
+      - name: Print Summary
+        if: success()
+        run: |
+          echo "════════════════════════════════════════"
+          echo " JSON to UC External Table : SUCCESS"
+          echo "════════════════════════════════════════"
+          echo "  JSON Source  : ${{ github.event.inputs.json_path }}"
+          echo "  Delta Path   : ${{ github.event.inputs.delta_output_path }}"
+          echo "  UC Table     : ${{ github.event.inputs.catalog_name }}.${{ github.event.inputs.schema_name }}.${{ github.event.inputs.table_name }}"
+          echo "  Triggered by : ${{ github.actor }}"
+          echo "  Run ID       : ${{ steps.submit_job.outputs.run_id }}"
+          echo "════════════════════════════════════════"
+
+      - name: Handle Failure
+        if: failure()
+        run: |
+          echo "════════════════════════════════════════"
+          echo " Workflow FAILED"
+          echo "════════════════════════════════════════"
+          echo "  Check Databricks job logs above"
+          echo "  Run ID : ${{ steps.submit_job.outputs.run_id }}"
+          echo "════════════════════════════════════════"
+          exit 1
